@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { TestCanvas } from './TestCanvas';
 import { DataChart } from './DataChart';
+import { ConstitutiveModelSelector, ConstitutiveParams } from './ConstitutiveModelSelector';
+import { MixDesignInput } from './MixDesignInput';
+import { ConcreteMixDesign, MIX_DESIGN_TEMPLATES } from '../services/mixDesignService';
 
 // 懒加载 3D 组件
 const Specimen3DViewer = lazy(() => import('./Specimen3DViewer'));
@@ -52,6 +55,10 @@ export const VirtualLabPage: React.FC = () => {
   // Params
   const [targetStrength, setTargetStrength] = useState(30); // Target MPa (e.g. C30)
   const [loadingRate, setLoadingRate] = useState(0.6); // MPa/s (ASTM C39 标准: 0.25±0.05 MPa/s)
+  
+  // 混凝土配合比参数
+  const [useMixDesign, setUseMixDesign] = useState(false); // 是否使用配合比计算强度
+  const [mixDesign, setMixDesign] = useState<ConcreteMixDesign>(MIX_DESIGN_TEMPLATES[1].mixDesign); // 默认使用C30配合比
   const [peakLoad, setPeakLoad] = useState(0);
   const [peakStress, setPeakStress] = useState(0);
   
@@ -73,11 +80,12 @@ export const VirtualLabPage: React.FC = () => {
 
   // 本构模型设置（从系统设置加载）
   const [constitutiveModel, setConstitutiveModel] = useState<ConstitutiveModelType>('hognestad');
-  const [customConstitutiveParams, setCustomConstitutiveParams] = useState<{
-    fc?: number;
-    epsilon0?: number;
-    epsilonU?: number;
-  }>({});
+  const [customConstitutiveParams, setCustomConstitutiveParams] = useState<ConstitutiveParams>({
+    fc: 30,
+    epsilon0: 0.002,
+    epsilonU: 0.0038,
+    E: 30000,
+  });
   const [useCustomParams, setUseCustomParams] = useState(false);
   
   // 混凝土材料属性（每次试验随机生成）
@@ -819,42 +827,54 @@ export const VirtualLabPage: React.FC = () => {
                 const newLoad = prevLoad + forceRate * dt; // kN
                 const newStress = newLoad * 1000 / area; // MPa
                 
-                // 从应力反算应变（使用本构模型的反函数）
-                // Hognestad: σ = fc * [2(ε/ε0) - (ε/ε0)²]
-                // 解方程得到 ε
-                let newStrain: number;
+                // 从应力反算应变（使用数值迭代法，适用于所有本构模型）
                 const fc = concreteProps.fc;
                 const epsilon0 = concreteProps.epsilon0;
                 
-                if (newStress <= fc) {
-                    // 上升段：求解二次方程
-                    // σ/fc = 2x - x², 其中 x = ε/ε0
-                    // x² - 2x + σ/fc = 0
-                    // x = 1 - sqrt(1 - σ/fc)
-                    const ratio = newStress / fc;
-                    if (ratio <= 1) {
-                        const x = 1 - Math.sqrt(Math.max(0, 1 - ratio));
-                        newStrain = x * epsilon0;
-                    } else {
-                        newStrain = epsilon0;
-                    }
+                // 使用二分法迭代求解应变
+                let newStrain: number;
+                if (newStress <= fc * 1.1) {
+                    // 在合理范围内迭代求解
+                    let strainMin = 0;
+                    let strainMax = epsilon0 * 2;
+                    let iterations = 0;
+                    const maxIterations = 50;
+                    const tolerance = 0.01; // MPa
                     
+                    while (iterations < maxIterations && (strainMax - strainMin) > 1e-8) {
+                        const strainMid = (strainMin + strainMax) / 2;
+                        const result = calcConcreteStress(strainMid, concreteProps);
+                        const stressMid = result.stress;
+                        
+                        if (Math.abs(stressMid - newStress) < tolerance) {
+                            newStrain = strainMid;
+                            break;
+                        }
+                        
+                        if (stressMid < newStress) {
+                            strainMin = strainMid;
+                        } else {
+                            strainMax = strainMid;
+                        }
+                        iterations++;
+                    }
+                    newStrain = (strainMin + strainMax) / 2;
                 } else {
-                    // 峰后软化段（力控制下不稳定，会突然破坏）
+                    // 超过峰值，力控制下不稳定
                     newStrain = concreteProps.epsilonU;
                 }
                 
-                // 使用本构模型验证并获取阶段
+                // 使用本构模型计算实际应力和阶段
                 const result = calcConcreteStress(newStrain, concreteProps);
-                const noisyResult = addRealisticNoise(result.stress, newStrain, result.phase);
+                const noisyResult = addRealisticNoise(newStress, newStrain, result.phase);
                 
                 setCurrentStrain(newStrain);
-                setCurrentStress(noisyResult.stress);
+                setCurrentStress(newStress);
                 setCurrentPhase(result.phase);
                 
                 // 更新峰值
-                if (noisyResult.stress > peakStress) {
-                    setPeakStress(noisyResult.stress);
+                if (newStress > peakStress) {
+                    setPeakStress(newStress);
                     setPeakLoad(newLoad);
                 }
                 
@@ -881,7 +901,7 @@ export const VirtualLabPage: React.FC = () => {
                         return [...prevData, { 
                             time: simulationTime, 
                             load: newLoad, 
-                            stress: noisyResult.stress, 
+                            stress: newStress, 
                             strain: newStrain 
                         }];
                     }
@@ -1477,6 +1497,20 @@ export const VirtualLabPage: React.FC = () => {
                         </select>
                     </div>
 
+                    {/* 本构模型选择器 */}
+                    <div className="mb-4">
+                        <ConstitutiveModelSelector
+                            materialType={materialType}
+                            selectedModel={constitutiveModel}
+                            customParams={customConstitutiveParams}
+                            useCustomParams={useCustomParams}
+                            onModelChange={setConstitutiveModel}
+                            onParamsChange={setCustomConstitutiveParams}
+                            onUseCustomParamsChange={setUseCustomParams}
+                            targetStrength={targetStrength}
+                        />
+                    </div>
+
                     {/* 试验类型 */}
                     <div className="mb-4">
                         <div className="text-[10px] font-mono text-slate-500 uppercase mb-2">试验类型 Test Type</div>
@@ -1595,30 +1629,58 @@ export const VirtualLabPage: React.FC = () => {
                     </h3>
                     
                     <div className="space-y-5">
-                        {/* 强度等级 */}
-                        <div>
-                            <div className="flex justify-between items-center mb-2">
-                                <span className="text-xs font-mono text-slate-400">强度等级 Strength</span>
-                                <span className="text-sm font-mono font-bold text-white bg-blue-600 px-3 py-1 rounded-lg">
-                                    {targetStrength} {materialInfo.unit}
-                                </span>
+                        {/* 强度计算模式切换 */}
+                        {materialType === MaterialType.CONCRETE && (
+                            <div className="flex items-center justify-between p-2 bg-slate-900/50 rounded">
+                                <span className="text-xs text-slate-300">使用配合比计算强度</span>
+                                <button
+                                    onClick={() => setUseMixDesign(!useMixDesign)}
+                                    disabled={status !== TestStatus.IDLE}
+                                    className={`relative w-11 h-6 rounded-full transition-colors ${
+                                        useMixDesign ? 'bg-green-600' : 'bg-slate-600'
+                                    } ${status !== TestStatus.IDLE ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                >
+                                    <div
+                                        className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                                            useMixDesign ? 'translate-x-5' : 'translate-x-0'
+                                        }`}
+                                    />
+                                </button>
                             </div>
-                            <input 
-                                type="range" 
-                                min={materialInfo.strengthRange[0]} 
-                                max={materialInfo.strengthRange[1]} 
-                                step={materialType === MaterialType.STEEL ? 10 : materialType === MaterialType.ROCK ? 5 : 2.5}
-                                value={targetStrength}
-                                onChange={(e) => setTargetStrength(Number(e.target.value))}
-                                disabled={status !== TestStatus.IDLE}
-                                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                        )}
+
+                        {/* 配合比输入或直接强度输入 */}
+                        {useMixDesign && materialType === MaterialType.CONCRETE ? (
+                            <MixDesignInput
+                                mixDesign={mixDesign}
+                                onMixDesignChange={setMixDesign}
+                                onStrengthCalculated={setTargetStrength}
                             />
-                            <div className="flex justify-between text-[10px] text-slate-600 mt-1">
-                                <span>{materialInfo.strengthRange[0]}</span>
-                                <span>{Math.round((materialInfo.strengthRange[0] + materialInfo.strengthRange[1]) / 2)}</span>
-                                <span>{materialInfo.strengthRange[1]}</span>
+                        ) : (
+                            <div>
+                                <div className="flex justify-between items-center mb-2">
+                                    <span className="text-xs font-mono text-slate-400">强度等级 Strength</span>
+                                    <span className="text-sm font-mono font-bold text-white bg-blue-600 px-3 py-1 rounded-lg">
+                                        {targetStrength} {materialInfo.unit}
+                                    </span>
+                                </div>
+                                <input 
+                                    type="range" 
+                                    min={materialInfo.strengthRange[0]} 
+                                    max={materialInfo.strengthRange[1]} 
+                                    step={materialType === MaterialType.STEEL ? 10 : materialType === MaterialType.ROCK ? 5 : 2.5}
+                                    value={targetStrength}
+                                    onChange={(e) => setTargetStrength(Number(e.target.value))}
+                                    disabled={status !== TestStatus.IDLE}
+                                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                                />
+                                <div className="flex justify-between text-[10px] text-slate-600 mt-1">
+                                    <span>{materialInfo.strengthRange[0]}</span>
+                                    <span>{Math.round((materialInfo.strengthRange[0] + materialInfo.strengthRange[1]) / 2)}</span>
+                                    <span>{materialInfo.strengthRange[1]}</span>
+                                </div>
                             </div>
-                        </div>
+                        )}
                         
                         {/* 加载速率 */}
                         <div>

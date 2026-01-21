@@ -1,7 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { TestType } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const API_KEY = process.env.API_KEY || '';
+const ai = API_KEY ? new GoogleGenAI({ apiKey: API_KEY }) : null;
 
 export const generateLabReport = async (
   testType: TestType,
@@ -29,6 +30,17 @@ export const generateLabReport = async (
     
     Keep tone clinical and professional. Max 150 words.
   `;
+
+  if (!ai) {
+    return `## 测试报告
+
+**测试类型**: ${typeStr}
+**极限载荷**: ${peakLoad.toFixed(2)} kN
+**极限强度**: ${peakStress.toFixed(2)} MPa
+**破坏时间**: ${duration.toFixed(1)} s
+
+*注意: AI 分析功能需要配置 Gemini API 密钥。当前显示基础测试数据。*`;
+  }
 
   try {
     const response = await ai.models.generateContent({

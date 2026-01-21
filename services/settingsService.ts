@@ -4,7 +4,15 @@
  */
 
 // 本构模型类型
-export type ConstitutiveModelType = 'hognestad' | 'mander' | 'eurocode' | 'gb50010' | 'damage' | 'linear';
+export type ConstitutiveModelType = 
+  | 'hognestad' 
+  | 'eurocode' 
+  | 'chinese_parabola'
+  | 'mander' 
+  | 'kent_park'
+  | 'gb50010'
+  | 'damage'
+  | 'linear';
 
 // 本构模型配置
 export interface ConstitutiveModelConfig {
